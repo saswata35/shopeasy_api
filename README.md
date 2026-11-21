@@ -345,3 +345,5 @@ python test_api.py
 - [x] `.gitignore` excludes `venv/`, `.venv/`, `__pycache__/`, `*.py[cod]`, and `.env`.
 - [x] Order creation rollback proof (`409` on insufficient stock with zero partial writes) and cancellation stock restoration are verified in `test_api.py`.
 - [x] `python test_api.py --all` passes with `0` failed checks.
+
+Github Link : [@https://github.com/saswata35/shopeasy_api.git](https://github.com/saswata35/shopeasy_api.git)
