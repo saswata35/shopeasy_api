@@ -1,6 +1,6 @@
 # ShopEasy API
 
-A modular RESTful backend built with **Python's standard library** (`http.server`, `urllib.parse`, `json`, `re`, `argparse`) and **PostgreSQL** (`psycopg2`), structured cleanly around the **Model–View–Controller (MVC)** pattern.
+A modular RESTful backend built with **Python's standard library** (`http.server`, `urllib.parse`, `json`, `re`, `argparse`, `time`) and **PostgreSQL** (`psycopg2` with `SimpleConnectionPool`), structured cleanly around the **Model–View–Controller (MVC)** pattern.
 
 ---
 
@@ -26,9 +26,9 @@ ShopEasy API implements a layered MVC architecture with strict separation of res
 
 | Layer | Files | Responsibilities | Restrictions |
 | :--- | :--- | :--- | :--- |
-| **HTTP / Routing** | `server.py`, `router.py`, `http_utils.py` | Parse URLs/queries/JSON, match routes, dispatch handlers, send JSON responses | Must **NOT** contain SQL or business rules |
+| **HTTP / Routing** | `server.py`, `router.py`, `http_utils.py` | Parse URLs/queries/JSON, match routes, dispatch handlers, log request timing, send JSON responses | Must **NOT** contain SQL or business rules |
 | **Controller** | `controllers/*.py`, `validators.py` | Validate input, call models, select HTTP status codes, raise `ApiError` | Must **NOT** contain SQL |
-| **Model** | `models/*.py`, `db.py` | Execute parameterized SQL queries, manage transactions and row locks (`FOR UPDATE`) | Must **NOT** know about HTTP or JSON |
+| **Model** | `models/*.py`, `db.py` | Execute parameterized SQL queries, manage connection pool, transactions, and row locks (`FOR UPDATE`) | Must **NOT** know about HTTP or JSON |
 | **View** | `views.py` | Format response payloads, monetary strings (`"0.00"`), and ISO 8601 dates | Must **NOT** query the database |
 
 ---
@@ -42,34 +42,36 @@ shopeasy-api/
 ├── README.md
 ├── requirements.txt
 ├── test_api.py
-└── shopeasy_api/                  # (or src/ depending on repository layout)
+└── shopeasy_api/
     ├── __init__.py
-    ├── server.py                  # Entry point & HTTP request handler
+    ├── server.py                  # Entry point, HTTP request handler & timing logs
     ├── config.py                  # Environment variable loader & settings
     ├── errors.py                  # Custom ApiError exception
-    ├── db.py                      # PostgreSQL connection & transaction helpers
+    ├── db.py                      # PostgreSQL connection pool & transaction helpers
     ├── http_utils.py              # Request dataclass, JSON body parser & response writer
     ├── validators.py              # Input validation helpers
     ├── router.py                  # Regex URL pattern matcher & method dispatcher
     ├── views.py                   # JSON response formatters
     ├── models/
     │   ├── __init__.py
-    │   ├── product.py             # SQL queries for products
+    │   ├── product.py             # SQL queries & pagination for products
     │   ├── customer.py            # SQL queries for customers
-    │   └── order.py               # SQL queries & atomic transactions for orders/items
+    │   ├── order.py               # SQL queries & atomic transactions for orders/items
+    │   └── report.py              # Reporting queries (sales by product, top customers, reports list)
     └── controllers/
         ├── __init__.py
         ├── health_controller.py   # Health check endpoint logic
-        ├── product_controller.py  # Product CRUD validation & orchestration
-        ├── customer_controller.py # Customer CRUD validation & orchestration
-        └── order_controller.py    # Order & order items validation & orchestration
+        ├── product_controller.py  # Product CRUD & pagination orchestration
+        ├── customer_controller.py # Customer CRUD & customer orders orchestration
+        ├── order_controller.py    # Order & order items validation & orchestration
+        └── report_controller.py   # Reporting endpoints orchestration
 ```
 
 ---
 
 ## 3. Database Prerequisites
 
-The API requires PostgreSQL with the following four tables initialized and populated:
+The API requires PostgreSQL with the core tables initialized and populated:
 
 | Table | Columns & Constraints |
 | :--- | :--- |
@@ -77,8 +79,9 @@ The API requires PostgreSQL with the following four tables initialized and popul
 | `products` | `id` (PK), `name`, `price` ($\ge 0$), `stock` ($\ge 0$) |
 | `orders` | `id` (PK), `customer_id` (FK $\rightarrow$ `customers.id`), `order_date`, `status` (`pending` / `delivered` / `cancelled`) |
 | `order_items` | `id` (PK), `order_id` (FK $\rightarrow$ `orders.id`), `product_id` (FK $\rightarrow$ `products.id`), `quantity` ($> 0$) |
+| `reports` | `id` (PK), `name` (`UNIQUE`), `endpoint`, `description` (optional metadata table for `GET /reports`) |
 
-### Schema & Sample Data SQL
+### Schema SQL
 
 ```sql
 CREATE TABLE IF NOT EXISTS customers (
@@ -109,6 +112,13 @@ CREATE TABLE IF NOT EXISTS order_items (
     product_id INT NOT NULL REFERENCES products(id),
     quantity INT NOT NULL CHECK (quantity > 0)
 );
+
+CREATE TABLE IF NOT EXISTS reports (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(150) NOT NULL UNIQUE,
+    endpoint VARCHAR(255) NOT NULL,
+    description TEXT
+);
 ```
 
 ### Verify Table Readiness
@@ -118,13 +128,14 @@ SELECT COUNT(*) FROM customers;
 SELECT COUNT(*) FROM products;
 SELECT COUNT(*) FROM orders;
 SELECT COUNT(*) FROM order_items;
+SELECT COUNT(*) FROM reports;
 ```
 
 ---
 
 ## 4. Environment Configuration
 
-Database credentials and server ports are loaded from environment variables (or a local `.env` file). Never hardcode passwords in source code.
+Database credentials, connection pool limits, and server ports are loaded from environment variables (or a local `.env` file). Never hardcode passwords in source code.
 
 1. Copy `.env.example` to `.env`:
    ```bash
@@ -137,6 +148,8 @@ Database credentials and server ports are loaded from environment variables (or 
    DB_NAME=shopeasy
    DB_USER=shop_user
    DB_PASSWORD=your_password
+   DB_MIN_CONN=1
+   DB_MAX_CONN=10
    API_HOST=127.0.0.1
    API_PORT=8000
    ```
@@ -148,6 +161,8 @@ Database credentials and server ports are loaded from environment variables (or 
 | `DB_NAME` | `shopeasy` | Target PostgreSQL database name |
 | `DB_USER` | `shop_user` | PostgreSQL role with `SELECT`, `INSERT`, `UPDATE`, `DELETE` privileges |
 | `DB_PASSWORD` | `""` | Password for `DB_USER` |
+| `DB_MIN_CONN` | `1` | Minimum connections in `SimpleConnectionPool` |
+| `DB_MAX_CONN` | `10` | Maximum connections in `SimpleConnectionPool` |
 | `API_HOST` | `127.0.0.1` | Host interface to bind the HTTP server |
 | `API_PORT` | `8000` | Port to listen on |
 
@@ -157,8 +172,8 @@ Database credentials and server ports are loaded from environment variables (or 
 
 1. **Clone the repository and enter the directory:**
    ```bash
-   git clone https://github.com/Anand-WebSkitters/shopeasy-api.git
-   cd shopeasy-api
+   git clone https://github.com/saswata35/shopeasy_api.git
+   cd shopeasy_api
    ```
 
 2. **Create and activate a virtual environment:**
@@ -187,7 +202,6 @@ Start the HTTP server from the project root directory:
 ```bash
 python -m shopeasy_api.server
 ```
-*(If using the `src/` layout, run `python src/server.py`.)*
 
 Expected output:
 ```text
@@ -229,7 +243,7 @@ ShopEasy API listening on http://127.0.0.1:8000
 #### Products
 | Method | Endpoint | Description | Status Codes |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/products` | List products. Optional filters: `?max_price=`, `?min_price=`, `?in_stock=true`, `?sort=price` (`-price`, `name`, `-name`) | `200`, `400` |
+| `GET` | `/products` | List products. Optional filters: `?max_price=`, `?min_price=`, `?in_stock=true`, `?sort=price` (`-price`, `name`, `-name`), `?page=`, `?limit=` | `200`, `400` |
 | `GET` | `/products/{id}` | Retrieve a single product by ID | `200`, `400`, `404` |
 | `POST` | `/products` | Create a product (`name`, `price`, optional `stock`) | `201`, `400`, `422` |
 | `PATCH` | `/products/{id}` | Update any of `name`, `price`, `stock` | `200`, `400`, `404`, `422` |
@@ -240,6 +254,7 @@ ShopEasy API listening on http://127.0.0.1:8000
 | :--- | :--- | :--- | :--- |
 | `GET` | `/customers` | List customers. Optional filter: `?city=` | `200` |
 | `GET` | `/customers/{id}` | Retrieve a single customer by ID | `200`, `400`, `404` |
+| `GET` | `/customers/{id}/orders` | List all orders belonging to a single customer | `200`, `400`, `404` |
 | `POST` | `/customers` | Create a customer (`name`, `email`, optional `city`) | `201`, `400`, `409`, `422` |
 | `PATCH` | `/customers/{id}` | Update any of `name`, `email`, `city` | `200`, `400`, `404`, `409`, `422` |
 | `DELETE` | `/customers/{id}` | Delete a customer (refused if customer has existing orders) | `204`, `400`, `404`, `409` |
@@ -253,6 +268,15 @@ ShopEasy API listening on http://127.0.0.1:8000
 | `PATCH` | `/orders/{id}` | Update order status (`{"status": "delivered" \| "cancelled"}`) | `200`, `400`, `404`, `409`, `422` |
 | `DELETE` | `/orders/{id}` | Delete a `cancelled` order and its items | `204`, `400`, `404`, `409` |
 | `GET` | `/orders/{id}/items` | Retrieve line items for a single order with `line_total` | `200`, `400`, `404` |
+| `POST` | `/orders/{id}/items` | Add an item to a `pending` order and decrement stock atomically | `201`, `400`, `404`, `409`, `422` |
+| `DELETE` | `/orders/{id}/items/{item_id}` | Remove an item from a `pending` order and restore stock atomically | `204`, `400`, `404`, `409` |
+
+#### Reports
+| Method | Endpoint | Description | Status Codes |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/reports` | List available report endpoints from the `reports` table | `200` |
+| `GET` | `/reports/sales-by-product` | Units sold and revenue aggregated per product | `200` |
+| `GET` | `/reports/top-customers` | Top customers ranked by total spent on `delivered` orders (`?limit=3`) | `200`, `400` |
 
 ---
 
@@ -280,12 +304,12 @@ ShopEasy API listening on http://127.0.0.1:8000
 With the server running in one terminal, open a second terminal and run `test_api.py`:
 
 ```bash
-# Run all 58 automated checks across all groups
+# Run all automated checks across all groups
 python test_api.py --all
 
 # Run specific endpoint groups
 python test_api.py --group products customers
-python test_api.py --group orders errors
+python test_api.py --group orders errors stretch
 
 # List available test groups
 python test_api.py --list
@@ -297,7 +321,7 @@ python test_api.py --base-url http://localhost:9000 --all
 python test_api.py
 ```
 
-* Exit code `0` indicates all tests passed (`58 passed, 0 failed`).
+* Exit code `0` indicates all tests passed (`0` failed).
 * Exit code `1` indicates one or more assertions failed.
 
 ---
@@ -306,7 +330,7 @@ python test_api.py
 
 1. **URL & Query Parsing:** `shopeasy_api/server.py` (`ShopEasyHandler._handle`) parses `/products/3` via `urllib.parse.urlparse`.
 2. **Route Matching:** `shopeasy_api/router.py` (`Router.resolve`) matches `/products/{id}` for `GET` and maps to `product_controller.get_product` with `params={"id": "3"}`.
-3. **Database Query:** `shopeasy_api/models/product.py` (`get_by_id(3)`) runs `SELECT id, name, price, stock FROM products WHERE id = %s` using `db.get_cursor()`.
+3. **Database Query:** `shopeasy_api/models/product.py` (`get_by_id(3)`) runs `SELECT id, name, price, stock FROM products WHERE id = %s` using a pooled connection from `db.py`.
 4. **Response Formatting:** `shopeasy_api/views.py` (`product_view`) selects `id`, `name`, `price` (formatted to 2 decimal places), and `stock`.
 5. **Status Code Decision:** `shopeasy_api/controllers/product_controller.py` (`get_product`) returns `(200, product_view(row))`.
 6. **Invalid ID Handling (`GET /products/abc`):** `parse_positive_int` in `validators.py` raises `ApiError(400, "id must be a positive integer")`, returning HTTP `400` with `{"error": "id must be a positive integer"}` without querying PostgreSQL.
@@ -316,9 +340,8 @@ python test_api.py
 ## 11. Submission & Security Checklist
 
 - [x] Folder layout matches specification with clean separation between HTTP/routing, Controllers, Models, and Views.
-- [x] All Health, Product, Customer, Order, and Order Item endpoints return the specified HTTP status codes (`200`, `201`, `204`, `400`, `404`, `405`, `409`, `422`, `500`).
+- [x] All Health, Product, Customer, Order, Order Item, and Report endpoints return the specified HTTP status codes.
 - [x] All credentials are externalized via `.env`; no passwords or secrets exist in source code.
 - [x] `.gitignore` excludes `venv/`, `.venv/`, `__pycache__/`, `*.py[cod]`, and `.env`.
 - [x] Order creation rollback proof (`409` on insufficient stock with zero partial writes) and cancellation stock restoration are verified in `test_api.py`.
-- [x] `python test_api.py --all` passes with **58 passed, 0 failed**.#   s h o p e a s y _ a p i  
- 
+- [x] `python test_api.py --all` passes with `0` failed checks.
