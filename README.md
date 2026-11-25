@@ -1,6 +1,6 @@
 # ShopEasy API
 
-A modular RESTful backend built with **Python's standard library** (`http.server`, `urllib.parse`, `json`, `re`, `argparse`, `time`) and **PostgreSQL** (`psycopg2` with `SimpleConnectionPool`), structured cleanly around the **Model–View–Controller (MVC)** pattern.
+A modular RESTful backend built with **Python's standard library** (`http.server`, `urllib.parse`, `json`, `re`, `argparse`, `time`) and **PostgreSQL** (`psycopg2` with `SimpleConnectionPool`), structured cleanly around a layered **Controller – Service – Model – View** architecture.
 
 ---
 
@@ -13,21 +13,23 @@ A modular RESTful backend built with **Python's standard library** (`http.server
 5. [Installation & Setup](#5-installation--setup)
 6. [Running the Server](#6-running-the-server)
 7. [API Specification & Endpoints](#7-api-specification--endpoints)
-8. [Order Processing & Transaction Rules](#8-order-processing--transaction-rules)
-9. [Running the Test Suite (`test_api.py`)](#9-running-the-test-suite-test_apipy)
-10. [Request Lifecycle Trace (`GET /products/3`)](#10-request-lifecycle-trace-get-products3)
-11. [Submission & Security Checklist](#11-submission--security-checklist)
+8. [Pagination Process & Metadata](#8-pagination-process--metadata)
+9. [Order Processing & Transaction Rules](#9-order-processing--transaction-rules)
+10. [Running the Test Suite (`test_api.py`)](#10-running-the-test-suite-test_apipy)
+11. [Request Lifecycle Trace (`GET /products/3`)](#11-request-lifecycle-trace-get-products3)
+12. [Submission & Security Checklist](#12-submission--security-checklist)
 
 ---
 
 ## 1. Project Overview & Architecture
 
-ShopEasy API implements a layered MVC architecture with strict separation of responsibilities:
+ShopEasy API implements a layered architecture with strict separation of responsibilities across HTTP routing, Controllers, Services, Models, and Views:
 
 | Layer | Files | Responsibilities | Restrictions |
 | :--- | :--- | :--- | :--- |
 | **HTTP / Routing** | `server.py`, `router.py`, `http_utils.py` | Parse URLs/queries/JSON, match routes, dispatch handlers, log request timing, send JSON responses | Must **NOT** contain SQL or business rules |
-| **Controller** | `controllers/*.py`, `validators.py` | Validate input, call models, select HTTP status codes, raise `ApiError` | Must **NOT** contain SQL |
+| **Controller** | `controllers/*.py` | Extract request parameters/bodies, delegate to services, select HTTP status codes (`200`, `201`, `204`) | Must **NOT** contain SQL or complex business logic |
+| **Service** | `services/*.py`, `validators.py` | Validate inputs, enforce business rules, compute pagination metadata, invoke models and views | Must **NOT** execute raw SQL or manage HTTP sockets |
 | **Model** | `models/*.py`, `db.py` | Execute parameterized SQL queries, manage connection pool, transactions, and row locks (`FOR UPDATE`) | Must **NOT** know about HTTP or JSON |
 | **View** | `views.py` | Format response payloads, monetary strings (`"0.00"`), and ISO 8601 dates | Must **NOT** query the database |
 
@@ -52,19 +54,25 @@ shopeasy-api/
     ├── validators.py              # Input validation helpers
     ├── router.py                  # Regex URL pattern matcher & method dispatcher
     ├── views.py                   # JSON response formatters
-    ├── models/
+    ├── controllers/
     │   ├── __init__.py
-    │   ├── product.py             # SQL queries & pagination for products
-    │   ├── customer.py            # SQL queries for customers
-    │   ├── order.py               # SQL queries & atomic transactions for orders/items
-    │   └── report.py              # Reporting queries (sales by product, top customers, reports list)
-    └── controllers/
+    │   ├── health_controller.py   # Health check endpoint handler
+    │   ├── product_controller.py  # Thin HTTP controller for products
+    │   ├── customer_controller.py # Thin HTTP controller for customers
+    │   ├── order_controller.py    # Thin HTTP controller for orders & items
+    │   └── report_controller.py   # Thin HTTP controller for reporting endpoints
+    ├── services/
+    │   ├── __init__.py
+    │   ├── product_service.py     # Product validation, pagination & orchestration
+    │   ├── customer_service.py    # Customer validation, pagination & orchestration
+    │   ├── order_service.py       # Order validation, pagination & transaction orchestration
+    │   └── report_service.py      # Reporting validation & orchestration
+    └── models/
         ├── __init__.py
-        ├── health_controller.py   # Health check endpoint logic
-        ├── product_controller.py  # Product CRUD & pagination orchestration
-        ├── customer_controller.py # Customer CRUD & customer orders orchestration
-        ├── order_controller.py    # Order & order items validation & orchestration
-        └── report_controller.py   # Reporting endpoints orchestration
+        ├── product.py             # SQL queries & LIMIT/OFFSET pagination for products
+        ├── customer.py            # SQL queries & LIMIT/OFFSET pagination for customers
+        ├── order.py               # SQL queries, pagination & atomic transactions for orders/items
+        └── report.py              # Reporting queries (sales by product, top customers, reports list)
 ```
 
 ---
@@ -252,7 +260,7 @@ ShopEasy API listening on http://127.0.0.1:8000
 #### Customers
 | Method | Endpoint | Description | Status Codes |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/customers` | List customers. Optional filter: `?city=` | `200` |
+| `GET` | `/customers` | List customers. Optional filters: `?city=`, `?page=`, `?limit=` | `200`, `400` |
 | `GET` | `/customers/{id}` | Retrieve a single customer by ID | `200`, `400`, `404` |
 | `GET` | `/customers/{id}/orders` | List all orders belonging to a single customer | `200`, `400`, `404` |
 | `POST` | `/customers` | Create a customer (`name`, `email`, optional `city`) | `201`, `400`, `409`, `422` |
@@ -262,7 +270,7 @@ ShopEasy API listening on http://127.0.0.1:8000
 #### Orders & Order Items
 | Method | Endpoint | Description | Status Codes |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/orders` | List orders with `customer_name` and calculated `total`. Optional filters: `?status=`, `?customer_id=` | `200`, `400`, `422` |
+| `GET` | `/orders` | List orders with `customer_name` and calculated `total`. Optional filters: `?status=`, `?customer_id=`, `?page=`, `?limit=` | `200`, `400`, `422` |
 | `GET` | `/orders/{id}` | Retrieve full order detail (`customer`, `items`, `total`) | `200`, `400`, `404` |
 | `POST` | `/orders` | Place an order atomically (`customer_id`, `items`) | `201`, `400`, `404`, `409`, `422` |
 | `PATCH` | `/orders/{id}` | Update order status (`{"status": "delivered" \| "cancelled"}`) | `200`, `400`, `404`, `409`, `422` |
@@ -280,7 +288,39 @@ ShopEasy API listening on http://127.0.0.1:8000
 
 ---
 
-## 8. Order Processing & Transaction Rules
+## 8. Pagination Process & Metadata
+
+Collection endpoints (`GET /products`, `GET /customers`, and `GET /orders`) support standardized SQL `LIMIT`/`OFFSET` pagination through the Service and Model layers:
+
+* **Query Parameters:**
+  * `page`: 1-based page number (positive integer, defaults to `1` when `limit` is provided).
+  * `limit`: Number of records per page (positive integer up to `100`, defaults to `10` when `page` is provided). Requests with `limit > 100` or non-positive values return `400 Bad Request`.
+* **Backward Compatibility:**
+  * When **neither** `page` nor `limit` is passed (e.g., `GET /products`), the endpoint returns a flat JSON array `[...]`.
+  * When `page` or `limit` **is** passed (e.g., `GET /products?page=1&limit=2`), the service layer wraps the results in a paginated envelope:
+
+```json
+{
+  "items": [
+    {
+      "id": 1,
+      "name": "Wireless Mouse",
+      "price": "25.00",
+      "stock": 40
+    }
+  ],
+  "total": 12,
+  "page": 1,
+  "limit": 2,
+  "total_pages": 6,
+  "has_next": true,
+  "has_prev": false
+}
+```
+
+---
+
+## 9. Order Processing & Transaction Rules
 
 ### Placing an Order (`POST /orders`)
 * **Validation:** Requires `customer_id` and a non-empty `items` array (`400` if missing, `422` if `items` is empty, `quantity < 1`, or a `product_id` appears more than once).
@@ -299,7 +339,7 @@ ShopEasy API listening on http://127.0.0.1:8000
 
 ---
 
-## 9. Running the Test Suite (`test_api.py`)
+## 10. Running the Test Suite (`test_api.py`)
 
 With the server running in one terminal, open a second terminal and run `test_api.py`:
 
@@ -326,24 +366,25 @@ python test_api.py
 
 ---
 
-## 10. Request Lifecycle Trace (`GET /products/3`)
+## 11. Request Lifecycle Trace (`GET /products/3`)
 
 1. **URL & Query Parsing:** `shopeasy_api/server.py` (`ShopEasyHandler._handle`) parses `/products/3` via `urllib.parse.urlparse`.
 2. **Route Matching:** `shopeasy_api/router.py` (`Router.resolve`) matches `/products/{id}` for `GET` and maps to `product_controller.get_product` with `params={"id": "3"}`.
-3. **Database Query:** `shopeasy_api/models/product.py` (`get_by_id(3)`) runs `SELECT id, name, price, stock FROM products WHERE id = %s` using a pooled connection from `db.py`.
-4. **Response Formatting:** `shopeasy_api/views.py` (`product_view`) selects `id`, `name`, `price` (formatted to 2 decimal places), and `stock`.
-5. **Status Code Decision:** `shopeasy_api/controllers/product_controller.py` (`get_product`) returns `(200, product_view(row))`.
-6. **Invalid ID Handling (`GET /products/abc`):** `parse_positive_int` in `validators.py` raises `ApiError(400, "id must be a positive integer")`, returning HTTP `400` with `{"error": "id must be a positive integer"}` without querying PostgreSQL.
+3. **Controller & Service Delegation:** `product_controller.get_product` calls `product_service.get_product_service("3")`.
+4. **Validation & Database Query:** `product_service.py` validates `"3"` via `parse_positive_int` and calls `product_model.get_by_id(3)`, executing `SELECT id, name, price, stock FROM products WHERE id = %s` using a pooled connection from `db.py`.
+5. **Response Formatting:** `shopeasy_api/views.py` (`product_view`) selects `id`, `name`, `price` (formatted to 2 decimal places), and `stock`, returning `(200, payload)`.
+6. **Invalid ID Handling (`GET /products/abc`):** `parse_positive_int` raises `ApiError(400, "id must be a positive integer")`, returning HTTP `400` with `{"error": "id must be a positive integer"}` without querying PostgreSQL.
 
 ---
 
-## 11. Submission & Security Checklist
+## 12. Submission & Security Checklist
 
-- [x] Folder layout matches specification with clean separation between HTTP/routing, Controllers, Models, and Views.
+- [x] Folder layout matches specification with clean separation between HTTP/routing, Controllers, Services, Models, and Views.
 - [x] All Health, Product, Customer, Order, Order Item, and Report endpoints return the specified HTTP status codes.
+- [x] Pagination (`?page=` & `?limit=`) returns standardized metadata (`items`, `total`, `page`, `limit`, `total_pages`, `has_next`, `has_prev`) across products, customers, and orders.
 - [x] All credentials are externalized via `.env`; no passwords or secrets exist in source code.
 - [x] `.gitignore` excludes `venv/`, `.venv/`, `__pycache__/`, `*.py[cod]`, and `.env`.
 - [x] Order creation rollback proof (`409` on insufficient stock with zero partial writes) and cancellation stock restoration are verified in `test_api.py`.
 - [x] `python test_api.py --all` passes with `0` failed checks.
 
-Github Link : [@https://github.com/saswata35/shopeasy_api.git](https://github.com/saswata35/shopeasy_api.git)
+GitHub Repository: [https://github.com/saswata35/shopeasy_api.git](https://github.com/saswata35/shopeasy_api.git)
