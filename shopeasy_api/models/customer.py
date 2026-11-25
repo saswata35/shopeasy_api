@@ -1,19 +1,35 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from shopeasy_api.db import get_cursor
 
-def get_all(city: Optional[str] = None) -> List[Dict[str, Any]]:
-    sql = "SELECT id, name, email, city, created_at FROM customers WHERE 1=1"
+
+def get_all(
+    city: Optional[str] = None,
+    page: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    where_sql = " FROM customers WHERE 1=1"
     params: List[Any] = []
 
     if city is not None and city.strip() != "":
-        sql += " AND LOWER(city) = LOWER(%s)"
+        where_sql += " AND LOWER(city) = LOWER(%s)"
         params.append(city.strip())
 
-    sql += " ORDER BY id ASC"
-
     with get_cursor() as cur:
-        cur.execute(sql, params)
-        return list(cur.fetchall())
+        cur.execute(f"SELECT COUNT(*) AS total{where_sql}", params)
+        total = int(cur.fetchone()["total"])
+
+        select_sql = f"SELECT id, name, email, city, created_at{where_sql} ORDER BY id ASC"
+        query_params = list(params)
+
+        if page is not None or limit is not None:
+            effective_limit = limit if limit is not None else 10
+            effective_page = page if page is not None else 1
+            offset = (effective_page - 1) * effective_limit
+            select_sql += " LIMIT %s OFFSET %s"
+            query_params.extend([effective_limit, offset])
+
+        cur.execute(select_sql, query_params)
+        return list(cur.fetchall()), total
 
 
 def get_by_id(customer_id: int) -> Optional[Dict[str, Any]]:

@@ -25,38 +25,50 @@ def _fetch_order_item_with_product(cur, item_id: int) -> Optional[Dict[str, Any]
 def get_all(
     status: Optional[str] = None,
     customer_id: Optional[int] = None,
-) -> List[Dict[str, Any]]:
-    sql = """
-        SELECT
-            o.id,
-            o.order_date,
-            o.status,
-            o.customer_id,
-            c.name AS customer_name,
-            COALESCE(SUM(oi.quantity * p.price), 0) AS total
-        FROM orders o
-        JOIN customers c ON c.id = o.customer_id
-        LEFT JOIN order_items oi ON oi.order_id = o.id
-        LEFT JOIN products p ON p.id = oi.product_id
-        WHERE 1=1
-    """
+    page: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> tuple[List[Dict[str, Any]], int]:
+    where_sql = " WHERE 1=1"
     params: List[Any] = []
 
     if status is not None and status.strip() != "":
-        sql += " AND o.status = %s"
+        where_sql += " AND o.status = %s"
         params.append(status.strip())
     if customer_id is not None:
-        sql += " AND o.customer_id = %s"
+        where_sql += " AND o.customer_id = %s"
         params.append(customer_id)
 
-    sql += """
-        GROUP BY o.id, o.order_date, o.status, o.customer_id, c.name
-        ORDER BY o.id ASC
-    """
-
     with get_cursor() as cur:
-        cur.execute(sql, params)
-        return list(cur.fetchall())
+        cur.execute(f"SELECT COUNT(*) AS total FROM orders o{where_sql}", params)
+        total = int(cur.fetchone()["total"])
+
+        sql = f"""
+            SELECT
+                o.id,
+                o.order_date,
+                o.status,
+                o.customer_id,
+                c.name AS customer_name,
+                COALESCE(SUM(oi.quantity * p.price), 0) AS total
+            FROM orders o
+            JOIN customers c ON c.id = o.customer_id
+            LEFT JOIN order_items oi ON oi.order_id = o.id
+            LEFT JOIN products p ON p.id = oi.product_id
+            {where_sql}
+            GROUP BY o.id, o.order_date, o.status, o.customer_id, c.name
+            ORDER BY o.id ASC
+        """
+        query_params = list(params)
+
+        if page is not None or limit is not None:
+            effective_limit = limit if limit is not None else 10
+            effective_page = page if page is not None else 1
+            offset = (effective_page - 1) * effective_limit
+            sql += " LIMIT %s OFFSET %s"
+            query_params.extend([effective_limit, offset])
+
+        cur.execute(sql, query_params)
+        return list(cur.fetchall()), total
 
 
 def get_by_id(order_id: int) -> Optional[Dict[str, Any]]:

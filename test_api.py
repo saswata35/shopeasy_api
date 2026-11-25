@@ -334,7 +334,21 @@ def test_stretch(r: TestRunner) -> None:
     page_resp = requests.get(r.url("/products?page=1&limit=2"), timeout=5)
     r.check("GET /products?page=1&limit=2 returns 200", page_resp.status_code == 200)
     page_data = page_resp.json() if page_resp.status_code == 200 else {}
-    r.check("Paginated response has items and total", "items" in page_data and "total" in page_data)
+    r.check(
+        "Paginated products has items, total, page, limit, total_pages, has_next, has_prev",
+        all(k in page_data for k in ("items", "total", "page", "limit", "total_pages", "has_next", "has_prev")),
+    )
+    r.check("GET /products?limit=200 returns 400", requests.get(r.url("/products?limit=200"), timeout=5).status_code == 400)
+
+    cust_page = requests.get(r.url("/customers?page=1&limit=2"), timeout=5)
+    r.check("GET /customers?page=1&limit=2 returns 200", cust_page.status_code == 200)
+    cust_data = cust_page.json() if cust_page.status_code == 200 else {}
+    r.check("Paginated customers has items and total_pages", "items" in cust_data and "total_pages" in cust_data)
+
+    ord_page = requests.get(r.url("/orders?page=1&limit=2"), timeout=5)
+    r.check("GET /orders?page=1&limit=2 returns 200", ord_page.status_code == 200)
+    ord_data = ord_page.json() if ord_page.status_code == 200 else {}
+    r.check("Paginated orders has items and total_pages", "items" in ord_data and "total_pages" in ord_data)
 
     cust_orders = requests.get(r.url("/customers/1/orders"), timeout=5)
     r.check("GET /customers/1/orders returns 200", cust_orders.status_code == 200)
