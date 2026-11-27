@@ -154,8 +154,8 @@ Database credentials, connection pool limits, and server ports are loaded from e
    DB_HOST=localhost
    DB_PORT=5432
    DB_NAME=shopeasy
-   DB_USER=shop_user
-   DB_PASSWORD=your_password
+   DB_USER=saswata
+   DB_PASSWORD=Ronti@2001
    DB_MIN_CONN=1
    DB_MAX_CONN=10
    API_HOST=127.0.0.1
